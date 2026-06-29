@@ -15,7 +15,9 @@ const config = {
     email: process.env.EMAIL,
     password: process.env.PASSWORD,
     port: process.env.PORT || 3000,
-    headless: process.env.HEADLESS !== 'false'
+    headless: process.env.HEADLESS !== 'false',
+    cloudflareTimeout: parseInt(process.env.CLOUDFLARE_TIMEOUT) || 60000, // Increased to 60s
+    maxRetries: parseInt(process.env.MAX_RETRIES) || 3
 };
 
 console.log("[CONFIG] Loaded configuration:");
@@ -23,6 +25,7 @@ console.log(`  CAPTCHA_API_KEY: ${config.captchaApiKey ? '✅ Set' : '❌ Missin
 console.log(`  EMAIL: ${config.email ? '✅ Set' : '❌ Missing'}`);
 console.log(`  PASSWORD: ${config.password ? '✅ Set' : '❌ Missing'}`);
 console.log(`  HEADLESS: ${config.headless}`);
+console.log(`  CLOUDFLARE_TIMEOUT: ${config.cloudflareTimeout}ms`);
 
 // 2captcha solver
 class CaptchaSolver {
@@ -146,16 +149,26 @@ class BrowserSession {
             ]
         };
 
-        // Use @sparticuz/chromium for Railway
+        // Try to use @sparticuz/chromium for Railway
         try {
             const chromium = require('@sparticuz/chromium');
-            launchOptions.executablePath = await chromium.executablePath();
-            console.log("[BROWSER] ✅ Using @sparticuz/chromium (Railway optimized)");
+            const executablePath = await chromium.executablePath();
+            if (executablePath) {
+                launchOptions.executablePath = executablePath;
+                console.log("[BROWSER] ✅ Using @sparticuz/chromium (Railway optimized)");
+            }
         } catch (e) {
-            console.log("[BROWSER] ⚠️ @sparticuz/chromium not found, using default Chromium");
+            console.log("[BROWSER] ℹ️ @sparticuz/chromium not found, using default Chromium");
         }
 
-        this.browser = await puppeteer.launch(launchOptions);
+        try {
+            this.browser = await puppeteer.launch(launchOptions);
+        } catch (error) {
+            console.log("[BROWSER] ❌ Failed to launch with puppeteer-extra, trying fallback...");
+            const puppeteerCore = require('puppeteer-core');
+            this.browser = await puppeteerCore.launch(launchOptions);
+        }
+
         this.page = await this.browser.newPage();
         
         await this.page.setViewport({ width: 1280, height: 720 });
@@ -174,7 +187,60 @@ class BrowserSession {
         return this;
     }
 
-    async login() {
+    async handleCloudflare() {
+        console.log("[BROWSER] ⚠️ Cloudflare challenge detected! Waiting...");
+        
+        // Wait for Cloudflare to pass with multiple checks
+        const startTime = Date.now();
+        const maxWait = config.cloudflareTimeout;
+        
+        while (Date.now() - startTime < maxWait) {
+            const title = await this.page.title();
+            console.log(`[BROWSER] Current title: "${title}"`);
+            
+            // Check if we're no longer on the challenge page
+            if (!title.includes('Just a moment') && !title.includes('cf-challenge')) {
+                console.log("[BROWSER] ✅ Cloudflare bypassed!");
+                return true;
+            }
+            
+            // Check for the presence of login form
+            const hasForm = await this.page.evaluate(() => {
+                return document.querySelector('form') !== null;
+            });
+            
+            if (hasForm) {
+                console.log("[BROWSER] ✅ Login form detected - Cloudflare passed!");
+                return true;
+            }
+            
+            // Check if there's an error
+            const hasError = await this.page.evaluate(() => {
+                const errorElements = document.querySelectorAll('[class*="error"], [class*="alert"]');
+                return errorElements.length > 0;
+            });
+            
+            if (hasError) {
+                console.log("[BROWSER] ❌ Error detected on page");
+                return false;
+            }
+            
+            // Wait and check again
+            await this.page.waitForTimeout(3000);
+            
+            // Take screenshot every 10 seconds for debugging
+            if (Math.floor((Date.now() - startTime) / 10000) > Math.floor((Date.now() - startTime - 3000) / 10000)) {
+                await this.page.screenshot({ path: `cloudflare_wait_${Date.now()}.png` });
+                console.log("[BROWSER] 📸 Screenshot taken");
+            }
+        }
+        
+        console.log("[BROWSER] ❌ Cloudflare timeout exceeded");
+        await this.page.screenshot({ path: 'cloudflare_timeout.png' });
+        return false;
+    }
+
+    async login(retryCount = 0) {
         console.log("[BROWSER] Starting login process...");
         this.lastLoginAttempt = new Date();
 
@@ -188,23 +254,30 @@ class BrowserSession {
             console.log(`[BROWSER] Current URL: ${this.page.url()}`);
             console.log(`[BROWSER] Page title: ${await this.page.title()}`);
 
-            // Check for Cloudflare challenge
+            // Handle Cloudflare challenge
             const pageContent = await this.page.content();
             if (pageContent.includes('Just a moment') || pageContent.includes('cf-challenge')) {
-                console.log("[BROWSER] ⚠️ Cloudflare challenge detected! Waiting...");
-                
-                await this.page.waitForFunction(
-                    () => !document.title.includes('Just a moment'),
-                    { timeout: 30000 }
-                );
-                
-                console.log("[BROWSER] ✅ Cloudflare bypassed!");
-                await this.page.screenshot({ path: 'after_cloudflare.png' });
+                const cfPassed = await this.handleCloudflare();
+                if (!cfPassed) {
+                    if (retryCount < config.maxRetries) {
+                        console.log(`[BROWSER] Retrying login (${retryCount + 1}/${config.maxRetries})...`);
+                        await this.page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+                        return await this.login(retryCount + 1);
+                    }
+                    throw new Error("Cloudflare challenge could not be bypassed");
+                }
             }
 
             // Wait for login form
-            await this.page.waitForSelector('form', { timeout: 15000 });
-            console.log("[BROWSER] Login form found!");
+            try {
+                await this.page.waitForSelector('form', { timeout: 15000 });
+                console.log("[BROWSER] Login form found!");
+            } catch (e) {
+                console.log("[BROWSER] No login form found, checking page content...");
+                await this.page.screenshot({ path: 'no_form.png' });
+                console.log("[BROWSER] Page content preview:", await this.page.evaluate(() => document.body.innerText.substring(0, 500)));
+                throw new Error("Login form not found");
+            }
 
             // Get CSRF token
             const csrfToken = await this.page.$eval('input[name="_token"]', el => el.value);
@@ -294,7 +367,7 @@ class BrowserSession {
         } catch (error) {
             console.error(`[BROWSER] Error: ${error.message}`);
             if (this.page) {
-                await this.page.screenshot({ path: 'error_screenshot.png' });
+                await this.page.screenshot({ path: `error_${Date.now()}.png` });
             }
             return false;
         }
@@ -376,13 +449,40 @@ async function main() {
         console.log(`[SERVER] Health endpoint: http://localhost:${config.port}/health`);
     });
 
-    // Initialize browser
-    browserSession = new BrowserSession();
-    await browserSession.init();
+    // Initialize browser with retry
+    let retries = 0;
+    let loginSuccess = false;
+    
+    while (retries < config.maxRetries && !loginSuccess) {
+        try {
+            console.log(`\n[MAIN] Attempt ${retries + 1}/${config.maxRetries}`);
+            
+            browserSession = new BrowserSession();
+            await browserSession.init();
 
-    // Initial login
-    console.log("\n[MAIN] Performing initial login...");
-    const loginSuccess = await browserSession.login();
+            console.log("\n[MAIN] Performing initial login...");
+            loginSuccess = await browserSession.login();
+            
+            if (!loginSuccess) {
+                console.log(`[MAIN] ❌ Login attempt ${retries + 1} failed`);
+                if (browserSession) {
+                    await browserSession.close();
+                }
+                retries++;
+                if (retries < config.maxRetries) {
+                    console.log(`[MAIN] Waiting 30 seconds before retry...`);
+                    await new Promise(resolve => setTimeout(resolve, 30000));
+                }
+            }
+        } catch (error) {
+            console.error(`[MAIN] Error on attempt ${retries + 1}: ${error.message}`);
+            retries++;
+            if (retries < config.maxRetries) {
+                console.log(`[MAIN] Waiting 30 seconds before retry...`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+        }
+    }
     
     if (loginSuccess) {
         console.log("[MAIN] ✅ Bot is ready!");
@@ -411,8 +511,12 @@ async function main() {
         }, 60000);
         
     } else {
-        console.log("[MAIN] ❌ Initial login failed!");
-        console.log("[MAIN] Check credentials or 2captcha API key");
+        console.log("[MAIN] ❌ All login attempts failed!");
+        console.log("[MAIN] Please check:");
+        console.log("  1. 2captcha API key is valid");
+        console.log("  2. Credentials are correct");
+        console.log("  3. The website is accessible");
+        console.log("  4. There's enough balance in 2captcha");
     }
 }
 
