@@ -119,17 +119,40 @@ class BrowserSession {
                 '--disable-gpu',
                 '--no-first-run',
                 '--no-zygote',
-                '--disable-extensions'
+                '--single-process',
+                '--disable-extensions',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-default-apps',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--autoplay-policy=user-gesture-required',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-breakpad',
+                '--disable-client-side-phishing-detection',
+                '--disable-crash-reporter',
+                '--disable-dev-shm-usage',
+                '--disable-domain-reliability',
+                '--disable-ipc-flooding-protection',
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-renderer-backgrounding',
+                '--disable-sync',
+                '--force-color-profile=srgb',
+                '--metrics-recording-only',
+                '--safebrowsing-disable-auto-update',
+                '--password-store=basic',
+                '--use-mock-keychain'
             ]
         };
 
-        // For Railway, use chromium from @sparticuz/chromium if available
+        // Use @sparticuz/chromium for Railway
         try {
             const chromium = require('@sparticuz/chromium');
             launchOptions.executablePath = await chromium.executablePath();
-            console.log("[BROWSER] Using @sparticuz/chromium");
+            console.log("[BROWSER] ✅ Using @sparticuz/chromium (Railway optimized)");
         } catch (e) {
-            console.log("[BROWSER] Using puppeteer's default Chromium");
+            console.log("[BROWSER] ⚠️ @sparticuz/chromium not found, using default Chromium");
         }
 
         this.browser = await puppeteer.launch(launchOptions);
