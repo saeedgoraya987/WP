@@ -106,8 +106,7 @@ class BrowserSession {
     async init() {
         console.log("[BROWSER] Launching browser...");
         
-        // Railway-specific launch args
-        this.browser = await puppeteer.launch({
+        let launchOptions = {
             headless: config.headless ? "new" : false,
             args: [
                 '--no-sandbox',
@@ -120,11 +119,20 @@ class BrowserSession {
                 '--disable-gpu',
                 '--no-first-run',
                 '--no-zygote',
-                '--single-process',
                 '--disable-extensions'
             ]
-        });
+        };
 
+        // For Railway, use chromium from @sparticuz/chromium if available
+        try {
+            const chromium = require('@sparticuz/chromium');
+            launchOptions.executablePath = await chromium.executablePath();
+            console.log("[BROWSER] Using @sparticuz/chromium");
+        } catch (e) {
+            console.log("[BROWSER] Using puppeteer's default Chromium");
+        }
+
+        this.browser = await puppeteer.launch(launchOptions);
         this.page = await this.browser.newPage();
         
         await this.page.setViewport({ width: 1280, height: 720 });
@@ -262,7 +270,9 @@ class BrowserSession {
 
         } catch (error) {
             console.error(`[BROWSER] Error: ${error.message}`);
-            await this.page.screenshot({ path: 'error_screenshot.png' });
+            if (this.page) {
+                await this.page.screenshot({ path: 'error_screenshot.png' });
+            }
             return false;
         }
     }
@@ -297,7 +307,7 @@ class BrowserSession {
     }
 }
 
-// Express server for health checks
+// Express server
 const app = express();
 let browserSession = null;
 
@@ -375,7 +385,7 @@ async function main() {
         setInterval(() => {
             const status = browserSession.getStatus();
             console.log(`[HEARTBEAT] Status: Logged In: ${status.isLoggedIn}, Cookies: ${status.cookies}`);
-        }, 60000); // Every minute
+        }, 60000);
         
     } else {
         console.log("[MAIN] ❌ Initial login failed!");
