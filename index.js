@@ -16,7 +16,7 @@ const config = {
     password: process.env.PASSWORD,
     port: process.env.PORT || 3000,
     headless: process.env.HEADLESS !== 'false',
-    cloudflareTimeout: parseInt(process.env.CLOUDFLARE_TIMEOUT) || 60000, // Increased to 60s
+    cloudflareTimeout: parseInt(process.env.CLOUDFLARE_TIMEOUT) || 90000,
     maxRetries: parseInt(process.env.MAX_RETRIES) || 3
 };
 
@@ -149,7 +149,6 @@ class BrowserSession {
             ]
         };
 
-        // Try to use @sparticuz/chromium for Railway
         try {
             const chromium = require('@sparticuz/chromium');
             const executablePath = await chromium.executablePath();
@@ -190,7 +189,6 @@ class BrowserSession {
     async handleCloudflare() {
         console.log("[BROWSER] ⚠️ Cloudflare challenge detected! Waiting...");
         
-        // Wait for Cloudflare to pass with multiple checks
         const startTime = Date.now();
         const maxWait = config.cloudflareTimeout;
         
@@ -198,13 +196,11 @@ class BrowserSession {
             const title = await this.page.title();
             console.log(`[BROWSER] Current title: "${title}"`);
             
-            // Check if we're no longer on the challenge page
             if (!title.includes('Just a moment') && !title.includes('cf-challenge')) {
                 console.log("[BROWSER] ✅ Cloudflare bypassed!");
                 return true;
             }
             
-            // Check for the presence of login form
             const hasForm = await this.page.evaluate(() => {
                 return document.querySelector('form') !== null;
             });
@@ -214,7 +210,6 @@ class BrowserSession {
                 return true;
             }
             
-            // Check if there's an error
             const hasError = await this.page.evaluate(() => {
                 const errorElements = document.querySelectorAll('[class*="error"], [class*="alert"]');
                 return errorElements.length > 0;
@@ -225,10 +220,9 @@ class BrowserSession {
                 return false;
             }
             
-            // Wait and check again
-            await this.page.waitForTimeout(3000);
+            // Wait 3 seconds before checking again (fixed: removed waitForTimeout)
+            await new Promise(resolve => setTimeout(resolve, 3000));
             
-            // Take screenshot every 10 seconds for debugging
             if (Math.floor((Date.now() - startTime) / 10000) > Math.floor((Date.now() - startTime - 3000) / 10000)) {
                 await this.page.screenshot({ path: `cloudflare_wait_${Date.now()}.png` });
                 console.log("[BROWSER] 📸 Screenshot taken");
@@ -254,7 +248,6 @@ class BrowserSession {
             console.log(`[BROWSER] Current URL: ${this.page.url()}`);
             console.log(`[BROWSER] Page title: ${await this.page.title()}`);
 
-            // Handle Cloudflare challenge
             const pageContent = await this.page.content();
             if (pageContent.includes('Just a moment') || pageContent.includes('cf-challenge')) {
                 const cfPassed = await this.handleCloudflare();
@@ -268,22 +261,20 @@ class BrowserSession {
                 }
             }
 
-            // Wait for login form
             try {
                 await this.page.waitForSelector('form', { timeout: 15000 });
                 console.log("[BROWSER] Login form found!");
             } catch (e) {
                 console.log("[BROWSER] No login form found, checking page content...");
                 await this.page.screenshot({ path: 'no_form.png' });
-                console.log("[BROWSER] Page content preview:", await this.page.evaluate(() => document.body.innerText.substring(0, 500)));
+                const content = await this.page.evaluate(() => document.body.innerText.substring(0, 500));
+                console.log(`[BROWSER] Page content preview: ${content}`);
                 throw new Error("Login form not found");
             }
 
-            // Get CSRF token
             const csrfToken = await this.page.$eval('input[name="_token"]', el => el.value);
             console.log(`[BROWSER] CSRF Token: ${csrfToken}`);
 
-            // Get Turnstile sitekey
             let sitekey = null;
             
             const turnstileDiv = await this.page.$('.cf-turnstile');
@@ -313,18 +304,15 @@ class BrowserSession {
                 throw new Error("Could not find Turnstile sitekey");
             }
 
-            // Solve captcha
             const captchaSolver = new CaptchaSolver(config.captchaApiKey);
             const solution = await captchaSolver.solveTurnstile(config.loginUrl, sitekey);
             const captchaToken = solution.token;
 
             console.log(`[CAPTCHA] Token received: ${captchaToken.substring(0, 50)}...`);
 
-            // Fill login form
             await this.page.type('input[name="email"]', config.email);
             await this.page.type('input[name="password"]', config.password);
 
-            // Inject captcha token
             await this.page.evaluate((token) => {
                 const input = document.createElement('input');
                 input.type = 'hidden';
@@ -333,7 +321,6 @@ class BrowserSession {
                 document.querySelector('form').appendChild(input);
             }, captchaToken);
 
-            // Submit form
             console.log("[BROWSER] Submitting login form...");
             await Promise.all([
                 this.page.click('button[type="submit"]'),
@@ -342,7 +329,6 @@ class BrowserSession {
 
             console.log(`[BROWSER] After login URL: ${this.page.url()}`);
 
-            // Check if login successful
             const currentUrl = this.page.url();
             if (currentUrl.includes('dashboard') || currentUrl.includes('portal')) {
                 console.log("[BROWSER] ✅ Login successful!");
@@ -443,13 +429,11 @@ async function main() {
     console.log("Starting SMS Bot with Puppeteer + 2captcha");
     console.log("=".repeat(60));
 
-    // Start express server
     app.listen(config.port, () => {
         console.log(`[SERVER] Health check running on port ${config.port}`);
         console.log(`[SERVER] Health endpoint: http://localhost:${config.port}/health`);
     });
 
-    // Initialize browser with retry
     let retries = 0;
     let loginSuccess = false;
     
@@ -487,7 +471,6 @@ async function main() {
     if (loginSuccess) {
         console.log("[MAIN] ✅ Bot is ready!");
         
-        // Setup cron job to refresh session every 30 minutes
         cron.schedule('*/30 * * * *', async () => {
             console.log("\n[CRON] Refreshing session...");
             try {
@@ -499,12 +482,9 @@ async function main() {
         });
         
         console.log("[MAIN] Cron job scheduled (every 30 minutes)");
-
-        // Keep the process alive
         console.log("[MAIN] Bot running. Press Ctrl+C to stop.");
         console.log("=".repeat(60));
         
-        // Periodic status check
         setInterval(() => {
             const status = browserSession.getStatus();
             console.log(`[HEARTBEAT] Status: Logged In: ${status.isLoggedIn}, Cookies: ${status.cookies}`);
@@ -537,7 +517,6 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
-// Run
 main().catch(error => {
     console.error(`[MAIN] Fatal error: ${error.message}`);
     process.exit(1);
