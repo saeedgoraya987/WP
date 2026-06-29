@@ -4,8 +4,7 @@
   "description": "SMS Bot with Cloudflare bypass and 2captcha",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "postinstall": "npx puppeteer-core install"
+    "start": "node index.js"
   },
   "dependencies": {
     "puppeteer-core": "^22.15.0",
